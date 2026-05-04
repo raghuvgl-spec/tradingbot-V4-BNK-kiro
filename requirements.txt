@@ -1,0 +1,9 @@
+smartapi-python
+pyotp
+requests
+pandas
+openpyxl
+streamlit
+plotly
+python-dotenv
+websocket-client

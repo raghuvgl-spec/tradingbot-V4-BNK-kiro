@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# Secrets
+.env
+
+# Data files (contain trading data, credentials, state)
+data/*.csv
+data/*.csv.bak
+data/*.csv.tmp
+data/*.json
+data/*.xlsx
+data/*.db
+
+# Logs
+logs/
+DailyTerminallogs/
+
+# IDE
+.vscode/
+*.code-workspace
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Pytest
+.pytest_cache/
+
+# Temp files
+*.tmp
+check_sideways.py
+view_db.py

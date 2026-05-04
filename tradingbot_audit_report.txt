@@ -1,0 +1,66 @@
+Trading Bot Audit Report
+Date: 2026-04-18
+
+Summary
+- The uploaded project was not production ready in its current form.
+- The main hard failures were architectural mismatch between bot.py, strategy.py, indicators.py, and orders.py.
+- A patched version of the project has been prepared as tradingbot-V2-patched.zip.
+
+Critical issues found in uploaded version
+1. bot.py called strategy_loop() with no arguments, while strategy.py required (candle, prev_candle).
+2. strategy.py called update_indicators(candle), but indicators.py defined update_indicators() with no arguments.
+3. strategy.py referenced ENTRY_DISTANCE_ATR_MULT and MIN_ATR_THRESHOLD without importing them.
+4. orders.py had been simplified too aggressively and no longer matched the rest of the system state/logging/broker flow.
+5. Runtime state object was missing fields now used by crossover/re-entry logic.
+6. Strategy was not reliably triggered from candle-close execution flow.
+
+What was patched
+- app/state.py
+  - Added missing runtime fields for crossover, re-entry, trend tracking, and restart safety.
+
+- app/strategy.py
+  - Rebuilt as a no-argument strategy engine using latest closed candles and indicator state.
+  - Added:
+    - VWAP filter
+    - EMA crossover entry
+    - crossover re-entry
+    - first retracement entry
+    - ATR distance filter
+    - sideways/choppy no-entry filter
+    - max trades / max daily loss / consecutive SL risk blocks
+
+- app/orders.py
+  - Rebuilt position lifecycle:
+    - entry with broker/paper path
+    - ATR stop loss
+    - ATR target
+    - ATR trailing stop
+    - recent-high / recent-low profit give-back exit
+    - reversal exit
+    - trade logging integration
+    - restart rebuild logic
+
+- app/bot.py
+  - Removed invalid direct strategy_loop() call.
+  - Bot now idles after websocket startup while strategy is triggered from live candle close.
+
+- app/broker.py
+  - Modified live tick/candle path so strategy_loop() runs when a candle closes.
+
+Current status after patch
+- Syntax compile check passed for patched core files.
+- Import-time dependency check failed only because local environment is missing installed package pyotp in the container.
+- That means code-level patching succeeded, but full runtime login/broker session was not tested inside this container.
+
+Still recommended before real-money use
+1. Run paper trading for at least one full live session.
+2. Verify Angel order placement payload fields against your account/exchange requirements.
+3. Confirm CE/PE symbol selection for your exact broker instrument master.
+4. Check dashboard signal labels versus desired marker text.
+5. Add a dedicated broker-side exit reconciliation check after exit orders.
+6. Add unit tests / replay tests using saved candles and tick_log.csv.
+7. Remove unused files such as dashboardzoomebaled.py if no longer needed.
+
+Important honesty note
+- This is a strong structural cleanup, not a guarantee of production safety.
+- Because broker APIs and market behavior are stateful, the patched bot should still be validated in paper mode before any live deployment.
