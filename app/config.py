@@ -133,7 +133,7 @@ ENABLE_PARTIAL_BOOKING = os.getenv("ENABLE_PARTIAL_BOOKING", "True").lower() == 
 DISCOUNT_POINTS = float(os.getenv("DISCOUNT_POINTS", "0"))
 ORDER_TAG_PREFIX = os.getenv("ORDER_TAG_PREFIX", "TBOT").strip()[:12]
 MAX_REENTRIES = int(os.getenv("MAX_REENTRIES", "2"))
-MIN_EMA_GAP_ATR =float(os.getenv("MIN_EMA_GAP_ATR", "0.25"))
+MIN_EMA_GAP_ATR =float(os.getenv("MIN_EMA_GAP_ATR", "0.30"))
 REENTRY_MIN_EMA_GAP_ATR = float(os.getenv("REENTRY_MIN_EMA_GAP_ATR", "0.35"))
 MIN_CANDLE_RANGE_ATR=float(os.getenv("MIN_CANDLE_RANGE_ATR", "0.50"))
 VWAP_NO_TRADE_ATR=float(os.getenv("VWAP_NO_TRADE_ATR", "0.30"))

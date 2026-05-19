@@ -860,5 +860,54 @@ with col5:
     if st.button("🔄 Refresh", width="stretch"):
         st.rerun()
 
+@_fragment(run_every="2s")
+def live_chart_section():
+    from app.files import read_market_data
+    """Refresh chart only, not the whole page."""
+    st.markdown('<div class="section-header">📊 Live BankNifty Chart</div>', unsafe_allow_html=True)
+    st.markdown('<div class="chart-container">', unsafe_allow_html=True)
+    state = read_state()
+    market_df = read_market_data()
+    
+    if not market_df.empty and "time" in market_df.columns:
+        market_df = market_df.copy()
+        market_df["time"] = pd.to_datetime(
+            market_df["time"],
+            errors="coerce"
+        )
+        # remove invalid timestamps
+        market_df = market_df.dropna(subset=["time"])
+        # sort properly
+        market_df = market_df.sort_values("time")
+        # remove duplicate candles
+        market_df = market_df.drop_duplicates(
+            subset=["time"],
+            keep="last"
+        )
+        # today's session only
+        today_start = pd.Timestamp.now().normalize()
+        tomorrow_start = today_start + pd.Timedelta(days=1)
+        market_df = market_df[
+            (market_df["time"] >= today_start) &
+            (market_df["time"] < tomorrow_start)
+        ].copy()
+        # reset indexing
+        market_df = market_df.reset_index(drop=True)
+        print(
+            "DEBUG CHART TIME RANGE:",
+            market_df["time"].min(),
+            market_df["time"].max()
+        )
+    trade_df = read_trade_log()
+    fig = build_chart(market_df, state, trade_df)
+
 st.caption("Start/Resume and Stop are soft controls. Full Restart reloads Python code changes.")
+st.markdown("<hr>", unsafe_allow_html=True)
+
+live_chart_section()
+
+st.markdown("<hr>", unsafe_allow_html=True)
+
 live_details_section()
+
+

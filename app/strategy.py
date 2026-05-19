@@ -98,6 +98,14 @@ def _log_rejection(candle: CandleSnapshot, signal_type: str, side: str, reason: 
         pass  # never block strategy for logging failures
 
 
+def _is_overextended(candle: CandleSnapshot) -> bool:
+    """Block entries when price is overextended from EMA9 (>1.5x ATR)."""
+    if candle.atr is None or candle.atr <= 0 or candle.fast_ema is None:
+        return False
+    dist = abs(candle.close - candle.fast_ema)
+    return dist > candle.atr * 1.5
+
+
 def _reentry_quality_ok(side: str, candle: CandleSnapshot, prev_candle: CandleSnapshot) -> tuple[bool, str]:
     """Loose reentry check — if trend is intact and price bounces back, allow it."""
     if candle.atr is None or candle.atr <= 0:
@@ -279,21 +287,44 @@ def strategy_loop():
             STATE.last_trend_side = "SELL"
             print(f"🔄 TREND SYNC: SELL (EMA9 < EMA21)")
 
+    # ─── PHASE-BASED ENTRY GATING ────────────────────────────────────────────
+    # CONTRACTION → PREBUY, CROSSOVER only (max 1-2 entries)
+    # EXPANSION → REENTRY, HIGHER_LOW, TREND only
+    # PEAK → NO entry
+    # SIDEWAYS → NO entry (dead zone — wait for direction)
+    current_phase = STATE.ema_cycle_phase
+
     # ─── 1. PRE-BUY / PRE-SELL (bypass cooldown) ─────────────────────────────
-    pre_buy = detect_prebuy(candle, prev_candle)
-    pre_sell = detect_presell(candle, prev_candle)
+    # Only allowed in CONTRACTING phase (NOT sideways — sideways is dead zone)
+    if current_phase == "CONTRACTING":
+        pre_buy = detect_prebuy(candle, prev_candle)
+        pre_sell = detect_presell(candle, prev_candle)
 
-    if pre_buy:
-        reset_for_new_trend("BUY")
-        if enter_trade("BUY", candle, entry_type="PREBUY"):
-            print("⚡ PRE-BUY ENTRY: taken before bullish crossover")
-        return
+        if pre_buy:
+            reset_for_new_trend("BUY")
+            if enter_trade("BUY", candle, entry_type="PREBUY"):
+                print("⚡ PRE-BUY ENTRY: taken before bullish crossover")
+            return
 
-    if pre_sell:
-        reset_for_new_trend("SELL")
-        if enter_trade("SELL", candle, entry_type="PRESELL"):
-            print("⚡ PRE-SELL ENTRY: taken before bearish crossover")
+        if pre_sell:
+            reset_for_new_trend("SELL")
+            if enter_trade("SELL", candle, entry_type="PRESELL"):
+                print("⚡ PRE-SELL ENTRY: taken before bearish crossover")
+            return
+    elif current_phase == "PEAK":
+        # PEAK phase — NO new entries allowed
+        print(f"🚫 PEAK PHASE — no entries | gap={abs(candle.fast_ema - candle.slow_ema):.2f}")
+        _log_rejection(candle, "ALL", STATE.last_trend_side or "BUY", "PEAK phase - no entries")
+        write_market_data()
         return
+    elif current_phase == "SIDEWAYS":
+        # SIDEWAYS — only crossover allowed (signals direction change)
+        # All other entries blocked
+        pass  # fall through to crossover detection below
+
+    # ─── CONTRACTING/SIDEWAYS BLOCK for remaining entry types ───────────────
+    # After crossover check, block TREND/HIGHER_LOW/REENTRY in these phases
+    _contracting_or_sideways_block = current_phase in ("CONTRACTING", "SIDEWAYS")
 
     # ─── COOLDOWN BLOCK (after prebuy/presell check) ─────────────────────────
     if in_cooldown:
@@ -388,7 +419,8 @@ def strategy_loop():
 
     # ─── 2.5 TREND RE-EXPANSION ENTRY ────────────────────────────────────────
     # CONTRACTING → EXPANDING = trend survived the squeeze. Take the entry.
-    if _reexpansion_active and not _gap_falling:
+    # Only allowed if NOT in contracting phase anymore
+    if _reexpansion_active and not _gap_falling and not _contracting_or_sideways_block:
         if STATE.last_trend_side == "BUY" and valid_buy_continuation(candle):
             STATE.trend_reexpansion = False  # consumed
             print("🔄 TREND RE-EXPANSION BUY — entering trade")
@@ -399,6 +431,13 @@ def strategy_loop():
             print("🔄 TREND RE-EXPANSION SELL — entering trade")
             enter_trade("SELL", candle, entry_type="REEXPANSION")
             return
+
+    # ─── CONTRACTING/SIDEWAYS BLOCK for remaining entry types ────────────────
+    if _contracting_or_sideways_block:
+        print(f"🚫 {current_phase} — only prebuy/crossover allowed | gap={_curr_ema_gap:.2f}")
+        _log_rejection(candle, "ALL", STATE.last_trend_side or "BUY", f"{current_phase} - only prebuy/crossover")
+        write_market_data()
+        return
 
     # ─── 3. TREND CONTINUATION ────────────────────────────────────────────────
     # Only fires after a confirmed trend direction (last_trend_side set by crossover/prebuy)
@@ -422,13 +461,21 @@ def strategy_loop():
             print(f"🚫 TREND CONTINUATION BLOCKED | {_reason}")
             _log_rejection(candle, "TREND", STATE.last_trend_side or "BUY", _reason)
     elif STATE.last_trend_side == "BUY" and valid_buy_continuation(candle):
-        print("🚀 TREND CONTINUATION BUY")
-        enter_trade("BUY", candle, entry_type="TREND")
-        return
+        if _is_overextended(candle):
+            print(f"🚫 TREND BUY BLOCKED | OVEREXTENDED | dist={abs(candle.close - candle.fast_ema):.2f}")
+            _log_rejection(candle, "TREND", "BUY", "OVEREXTENDED")
+        else:
+            print("🚀 TREND CONTINUATION BUY")
+            enter_trade("BUY", candle, entry_type="TREND")
+            return
     elif STATE.last_trend_side == "SELL" and valid_sell_continuation(candle):
-        print("🚀 TREND CONTINUATION SELL")
-        enter_trade("SELL", candle, entry_type="TREND")
-        return
+        if _is_overextended(candle):
+            print(f"🚫 TREND SELL BLOCKED | OVEREXTENDED | dist={abs(candle.close - candle.fast_ema):.2f}")
+            _log_rejection(candle, "TREND", "SELL", "OVEREXTENDED")
+        else:
+            print("🚀 TREND CONTINUATION SELL")
+            enter_trade("SELL", candle, entry_type="TREND")
+            return
 
     # ─── 4. HIGHER_LOW ENTRY (price respects EMA9) ───────────────────────────
     # Block during CONTRACTING or when gap is falling from peak — pullback in dying trend is a trap
@@ -568,62 +615,75 @@ def detect_prebuy(candle: CandleSnapshot, prev_candle: CandleSnapshot) -> bool:
     ):
         return False
 
-    # Block counter-trend prebuy: don't buy CE when established trend is bearish
-    # Allow if no trend set yet (first trade of the day)
-    if STATE.last_trend_side == "SELL":
-        # Only allow if EMAs are very close (gap < ATR * 0.15) — genuine convergence
-        ema_gap = abs(candle.fast_ema - candle.slow_ema)
-        if ema_gap > candle.atr * 0.15:
-            print(
-                f"🚫 PREBUY BLOCKED | counter-trend (trend=SELL) | "
-                f"gap={ema_gap:.2f} > ATR*0.15={candle.atr * 0.15:.2f}"
-            )
-            _log_rejection(candle, "PREBUY", "BUY", f"counter-trend (trend=SELL) | gap={ema_gap:.2f}")
-            return False
+    ema_gap = abs(candle.fast_ema - candle.slow_ema)
+    prev_gap = abs(prev_candle.fast_ema - prev_candle.slow_ema)
+    gap_shrink = prev_gap - ema_gap
 
-    # prev candle: EMA9 below EMA21 (not yet crossed)
-    # current candle: EMA9 still below EMA21 (approaching but not crossed yet)
-    if not (prev_candle.fast_ema < prev_candle.slow_ema and candle.fast_ema < candle.slow_ema):
-        print(
-            f"🚫 PREBUY BLOCKED | already crossed or wrong side | "
-            f"prev_fast={prev_candle.fast_ema:.2f} prev_slow={prev_candle.slow_ema:.2f} | "
-            f"fast={candle.fast_ema:.2f} slow={candle.slow_ema:.2f}"
+    # ── REFINED COUNTER-TREND BLOCK ──────────────────────────────────────
+    # Allow prebuy even in SELL trend IF:
+    # 1. EMAs are converging (gap shrinking)
+    # 2. Price-EMA9 distance is shrinking (price returning to EMA9)
+    # 3. Gap is small enough (< 0.50 * ATR) — genuine convergence zone
+    if STATE.last_trend_side == "SELL":
+        gap_converging = gap_shrink > 0 and ema_gap < candle.atr * 0.50
+        price_returning = (
+            getattr(STATE, "price_ema9_momentum", None) == "SHRINKING"
+            or abs(candle.close - candle.fast_ema) < candle.atr * 0.30
         )
-        _log_rejection(candle, "PREBUY", "BUY", "already crossed or wrong side")
+        if not (gap_converging and price_returning):
+            if ema_gap > candle.atr * 0.50:
+                print(
+                    f"🚫 PREBUY BLOCKED | counter-trend (trend=SELL) | "
+                    f"gap={ema_gap:.2f} > ATR*0.50={candle.atr * 0.50:.2f}"
+                )
+                _log_rejection(candle, "PREBUY", "BUY", f"counter-trend (trend=SELL) | gap={ema_gap:.2f}")
+                return False
+
+    # ── EMA POSITION CHECK ───────────────────────────────────────────────
+    # EMA9 must be below EMA21 (not yet crossed) — this IS a pre-buy
+    if not (candle.fast_ema < candle.slow_ema):
+        # Already crossed — not a prebuy anymore
         return False
 
-    prev_gap = abs(prev_candle.fast_ema - prev_candle.slow_ema)
-    curr_gap = abs(candle.fast_ema - candle.slow_ema)
-    gap_shrink = prev_gap - curr_gap
+    # ── CONVERGENCE SIGNALS ──────────────────────────────────────────────
+    curr_gap = ema_gap
 
     # Price between EMA9 and EMA21 = convergence zone
     price_between_emas = (
         min(candle.fast_ema, candle.slow_ema) <= candle.close <= max(candle.fast_ema, candle.slow_ema)
     )
 
-    # Near either EMA
+    # Price near EMA9 (within 0.30 ATR)
     price_to_ema9 = abs(candle.close - candle.fast_ema)
-    price_to_ema21 = abs(candle.close - candle.slow_ema)
-    near_ema = min(price_to_ema9, price_to_ema21) <= candle.atr * 0.30
+    near_ema9 = price_to_ema9 <= candle.atr * 0.30
+
+    # Price above both EMAs (reclaim signal)
+    price_above_both = candle.close > max(candle.fast_ema, candle.slow_ema)
 
     # Classic prebuy: gap small + shrinking
     classic_prebuy = curr_gap <= PREBUY_MAX_EMA_GAP and gap_shrink >= PREBUY_MIN_GAP_SHRINK
-    # Zone prebuy: price between EMAs (convergence zone)
-    zone_prebuy = price_between_emas or near_ema
+    # Zone prebuy: price in convergence zone or above both EMAs
+    zone_prebuy = price_between_emas or near_ema9 or price_above_both
+
+    # ── REFINED ENTRY CONDITIONS ─────────────────────────────────────────
+    # REMOVED: bullish candle requirement (candle.close >= candle.open)
+    # In contraction, swings are small — requiring bullish candle misses entries
+    # Instead: EMA9 must be rising (direction confirmed) + price near/above EMAs
+
+    ema9_rising = candle.fast_ema > prev_candle.fast_ema
 
     print(
         f"🧪 PREBUY CHECK | "
         f"prev_gap={prev_gap:.2f} | curr_gap={curr_gap:.2f} | "
-        f"gap_shrink={gap_shrink:.2f} | between_emas={price_between_emas} | near_ema={near_ema} | "
-        f"fast_rising={candle.fast_ema > prev_candle.fast_ema} | "
-        f"bullish={candle.close > candle.open} | "
-        f"vwap=DISABLED"
+        f"gap_shrink={gap_shrink:.2f} | between_emas={price_between_emas} | "
+        f"near_ema9={near_ema9} | above_both={price_above_both} | "
+        f"ema9_rising={ema9_rising}"
     )
+
     return (
         (classic_prebuy or zone_prebuy)
-        and candle.fast_ema > prev_candle.fast_ema   # EMA9 must be rising
-        and candle.close >= candle.open               # bullish candle
-        and not _sideways_filter(candle)
+        and ema9_rising                              # EMA9 must be rising (direction)
+        and not _is_overextended(candle)             # don't prebuy at stretched levels
     )
 
 def detect_presell(candle: CandleSnapshot, prev_candle: CandleSnapshot) -> bool:
@@ -636,58 +696,62 @@ def detect_presell(candle: CandleSnapshot, prev_candle: CandleSnapshot) -> bool:
     ):
         return False
 
-    # Block counter-trend presell: don't buy PE when established trend is bullish
-    # Allow if no trend set yet (first trade of the day)
-    if STATE.last_trend_side == "BUY":
-        # Only allow if EMAs are very close (gap < ATR * 0.15) — genuine convergence
-        ema_gap = abs(candle.fast_ema - candle.slow_ema)
-        if ema_gap > candle.atr * 0.15:
-            print(
-                f"🚫 PRESELL BLOCKED | counter-trend (trend=BUY) | "
-                f"gap={ema_gap:.2f} > ATR*0.15={candle.atr * 0.15:.2f}"
-            )
-            _log_rejection(candle, "PRESELL", "SELL", f"counter-trend (trend=BUY) | gap={ema_gap:.2f}")
-            return False
+    ema_gap = abs(candle.fast_ema - candle.slow_ema)
+    prev_gap = abs(prev_candle.fast_ema - prev_candle.slow_ema)
+    gap_shrink = prev_gap - ema_gap
 
-    # prev candle: EMA9 above EMA21 (not yet crossed bearish)
-    # current candle: EMA9 still above EMA21 (approaching but not crossed yet)
-    if not (prev_candle.fast_ema > prev_candle.slow_ema and candle.fast_ema > candle.slow_ema):
-        print(
-            f"🚫 PRESELL BLOCKED | already crossed or wrong side | "
-            f"prev_fast={prev_candle.fast_ema:.2f} prev_slow={prev_candle.slow_ema:.2f} | "
-            f"fast={candle.fast_ema:.2f} slow={candle.slow_ema:.2f}"
+    # ── REFINED COUNTER-TREND BLOCK ──────────────────────────────────────
+    if STATE.last_trend_side == "BUY":
+        gap_converging = gap_shrink > 0 and ema_gap < candle.atr * 0.50
+        price_returning = (
+            getattr(STATE, "price_ema9_momentum", None) == "SHRINKING"
+            or abs(candle.close - candle.fast_ema) < candle.atr * 0.30
         )
-        _log_rejection(candle, "PRESELL", "SELL", "already crossed or wrong side")
+        if not (gap_converging and price_returning):
+            if ema_gap > candle.atr * 0.50:
+                print(
+                    f"🚫 PRESELL BLOCKED | counter-trend (trend=BUY) | "
+                    f"gap={ema_gap:.2f} > ATR*0.50={candle.atr * 0.50:.2f}"
+                )
+                _log_rejection(candle, "PRESELL", "SELL", f"counter-trend (trend=BUY) | gap={ema_gap:.2f}")
+                return False
+
+    # ── EMA POSITION CHECK ───────────────────────────────────────────────
+    # EMA9 must be above EMA21 (not yet crossed bearish) — this IS a pre-sell
+    if not (candle.fast_ema > candle.slow_ema):
         return False
 
-    prev_gap = abs(prev_candle.fast_ema - prev_candle.slow_ema)
-    curr_gap = abs(candle.fast_ema - candle.slow_ema)
-    gap_shrink = prev_gap - curr_gap
+    # ── CONVERGENCE SIGNALS ──────────────────────────────────────────────
+    curr_gap = ema_gap
 
     price_between_emas = (
         min(candle.fast_ema, candle.slow_ema) <= candle.close <= max(candle.fast_ema, candle.slow_ema)
     )
 
     price_to_ema9 = abs(candle.close - candle.fast_ema)
-    price_to_ema21 = abs(candle.close - candle.slow_ema)
-    near_ema = min(price_to_ema9, price_to_ema21) <= candle.atr * 0.30
+    near_ema9 = price_to_ema9 <= candle.atr * 0.30
+
+    # Price below both EMAs (breakdown signal)
+    price_below_both = candle.close < min(candle.fast_ema, candle.slow_ema)
 
     classic_presell = curr_gap <= PREBUY_MAX_EMA_GAP and gap_shrink >= PREBUY_MIN_GAP_SHRINK
-    zone_presell = price_between_emas or near_ema
+    zone_presell = price_between_emas or near_ema9 or price_below_both
+
+    # EMA9 must be falling (direction confirmed)
+    ema9_falling = candle.fast_ema < prev_candle.fast_ema
 
     print(
         f"🧪 PRESELL CHECK | "
         f"prev_gap={prev_gap:.2f} | curr_gap={curr_gap:.2f} | "
-        f"gap_shrink={gap_shrink:.2f} | between_emas={price_between_emas} | near_ema={near_ema} | "
-        f"fast_falling={candle.fast_ema < prev_candle.fast_ema} | "
-        f"bearish={candle.close < candle.open}"
+        f"gap_shrink={gap_shrink:.2f} | between_emas={price_between_emas} | "
+        f"near_ema9={near_ema9} | below_both={price_below_both} | "
+        f"ema9_falling={ema9_falling}"
     )
 
     return (
         (classic_presell or zone_presell)
-        and candle.fast_ema < prev_candle.fast_ema
-        and candle.close < candle.open
-        and not _sideways_filter(candle)
+        and ema9_falling                             # EMA9 must be falling (direction)
+        and not _is_overextended(candle)             # don't presell at stretched levels
     )
 
 
@@ -750,7 +814,7 @@ def _sideways_filter(candle: CandleSnapshot) -> bool:
 #               Trend mature, momentum fading. Activate tighter exits.
 # CONTRACTING:  Gap narrowing toward next crossover. Avoid new entries.
 
-EMA_CYCLE_SIDEWAYS_ATR = 0.15       # below this = sideways (matches MIN_EMA_GAP_ATR)
+EMA_CYCLE_SIDEWAYS_ATR = 0.30       # below this = sideways (matches MIN_EMA_GAP_ATR)
 EMA_CYCLE_PEAK_CANDLES = 2          # gap must narrow for N candles to confirm peak→contracting
 EMA_CYCLE_EXPAND_CANDLES = 2        # gap must widen for N candles to confirm expanding
 EMA_CYCLE_PEAK_CONFIRM = 2          # gap must narrow for N candles to confirm EXPANDING→PEAK

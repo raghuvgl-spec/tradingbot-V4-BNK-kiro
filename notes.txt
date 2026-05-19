@@ -1,0 +1,35 @@
+ Volume in drive D is New Volume
+ Volume Serial Number is B64D-72E8
+
+ Directory of D:\PythonCode\tradingbot-V4-BNK-KIRO
+
+11-05-2026  11:29    <DIR>          .
+11-05-2026  11:29    <DIR>          ..
+06-05-2026  09:10             2,058 .env
+04-05-2026  18:14               398 .gitignore
+29-04-2026  11:38    <DIR>          .kiro
+01-05-2026  09:21    <DIR>          .pytest_cache
+27-04-2026  08:47    <DIR>          .venv
+25-04-2026  15:39    <DIR>          .vscode
+01-05-2026  09:34    <DIR>          app
+03-04-2026  21:24             5,205 backtest.py
+09-04-2026  18:09             2,795 bot_manager.py
+05-05-2026  18:03             1,681 check_direction.py
+06-05-2026  09:22               332 check_open.py
+04-05-2026  11:49               701 check_sideways.py
+11-05-2026  09:00    <DIR>          DailyTerminallogs
+11-05-2026  11:29    <DIR>          data
+05-04-2026  13:40               285 date.py
+11-05-2026  08:22    <DIR>          logs
+11-05-2026  11:29                 0 notes.txt
+25-03-2026  14:12               407 README.md
+21-04-2026  09:13               965 README_LIVE_PREP.md
+25-03-2026  14:12                95 requirements.txt
+03-04-2026  20:12             5,505 run_backtest.py
+01-05-2026  09:40             2,670 run_bot.py
+24-04-2026  14:08               323 run_dashboard.py
+01-05-2026  09:37    <DIR>          tests
+18-04-2026  11:01             3,068 tradingbot_audit_report.txt
+04-05-2026  13:57             1,458 view_db.py
+              17 File(s)         27,946 bytes
+              11 Dir(s)  133,196,681,216 bytes free

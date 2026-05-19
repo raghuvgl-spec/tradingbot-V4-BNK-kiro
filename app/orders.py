@@ -113,6 +113,17 @@ def enter_trade(trend_side, candle, entry_type="CROSSOVER"):
     min_sl_distance = SL_POINTS
     min_target_distance = TARGET_POINTS
 
+    # ── PHASE-ADAPTIVE SL ────────────────────────────────────────────────
+    # In strong trend (EXPANDING), give more breathing room
+    # Use percentage of premium as minimum SL (2.5% of entry price)
+    ema_phase = getattr(STATE, "ema_cycle_phase", "SIDEWAYS")
+    if ema_phase == "EXPANDING":
+        # Wider SL in expanding — trend needs room to breathe
+        pct_sl = entry_price * 0.025  # 2.5% of premium
+        min_sl_distance = max(SL_POINTS, pct_sl)
+    else:
+        min_sl_distance = SL_POINTS
+
     sl_distance = max(atr_sl_distance, min_sl_distance)
     target_distance = max(atr_target_distance, min_target_distance)
 
@@ -123,7 +134,7 @@ def enter_trade(trend_side, candle, entry_type="CROSSOVER"):
         f"🧾 ENTRY DEBUG | entry={entry_price:.2f} | index_close={candle.close:.2f} | "
         f"atr={atr:.2f} | premium_mult={premium_multiplier:.6f} | "
         f"atr_sl_dist={atr_sl_distance:.2f} | final_sl_dist={sl_distance:.2f} | "
-        f"target_dist={target_distance:.2f}"
+        f"target_dist={target_distance:.2f} | phase={ema_phase}"
     )
 
     sl = entry_price - sl_distance
@@ -402,6 +413,27 @@ def manage_open_position(candle):
             breakeven_sl = entry_price_val + 1.0  # 1pt above entry to cover slippage
             pos["sl"] = max(float(pos["sl"]), breakeven_sl)
 
+        # ── LEADING PHASE PROFIT LOCK ────────────────────────────────────
+        # Layer 1: When in profit and leading is EXPANDING → lock breakeven
+        # Layer 2: When leading PEAKED → tighten SL aggressively
+        leading_phase = getattr(STATE, "leading_phase", "SIDEWAYS")
+        if move_from_entry > 0:
+            if leading_phase in ("PEAKED_UP", "PEAKED_DOWN", "COMPRESSING_DOWN", "COMPRESSING_UP"):
+                # Leading peaked — tighten SL to lock most profit
+                tight_sl = pos["highest_price"] - (atr * 0.3)
+                if tight_sl > float(pos["sl"]):
+                    pos["sl"] = tight_sl
+                    print(
+                        f"🔒 LEADING PHASE LOCK | phase={leading_phase} | "
+                        f"SL tightened to {tight_sl:.2f} | peak={pos['highest_price']:.2f}"
+                    )
+            elif leading_phase in ("EXPANDING_UP", "EXPANDING_DOWN"):
+                # Still expanding — just ensure breakeven
+                if move_from_entry >= atr * 0.5:
+                    be_sl = entry_price_val + 1.0
+                    if be_sl > float(pos["sl"]):
+                        pos["sl"] = be_sl
+
         trail_sl = pos["highest_price"] - (atr * trail_multiplier)
         pos["sl"] = max(float(pos["sl"]), trail_sl)
 
@@ -609,6 +641,23 @@ def manage_open_position(candle):
         if move_from_entry >= atr * 1.5:
             breakeven_sl = entry_price_val - 1.0
             pos["sl"] = min(float(pos["sl"]), breakeven_sl)
+
+        # ── LEADING PHASE PROFIT LOCK (SELL side) ────────────────────────
+        leading_phase = getattr(STATE, "leading_phase", "SIDEWAYS")
+        if move_from_entry > 0:
+            if leading_phase in ("PEAKED_UP", "PEAKED_DOWN", "COMPRESSING_DOWN", "COMPRESSING_UP"):
+                tight_sl = pos["lowest_price"] + (atr * 0.3)
+                if tight_sl < float(pos["sl"]):
+                    pos["sl"] = tight_sl
+                    print(
+                        f"🔒 LEADING PHASE LOCK | phase={leading_phase} | "
+                        f"SL tightened to {tight_sl:.2f} | trough={pos['lowest_price']:.2f}"
+                    )
+            elif leading_phase in ("EXPANDING_UP", "EXPANDING_DOWN"):
+                if move_from_entry >= atr * 0.5:
+                    be_sl = entry_price_val - 1.0
+                    if be_sl < float(pos["sl"]):
+                        pos["sl"] = be_sl
 
         trail_sl = pos["lowest_price"] + (atr * trail_multiplier)
         pos["sl"] = min(float(pos["sl"]), trail_sl)
